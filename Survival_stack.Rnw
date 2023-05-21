@@ -1,0 +1,925 @@
+\documentclass[12pt]{article}
+\usepackage{amsmath, amssymb, amsfonts, bm}
+\usepackage[pdftitle={knitRdemo}, colorlinks=false, linkcolor=blue,
+citecolor=blue, urlcolor=blue, linktocpage=true, breaklinks=true]{hyperref}
+\usepackage[margin=1in]{geometry}
+\usepackage{pdflscape}
+\usepackage{url}
+\usepackage{wrapfig}
+\usepackage{booktabs}
+\usepackage{float}
+
+\begin{document}
+
+\title{\textbf {Survival Stacking Implementation}}
+\author{
+		Hanning Su, Hanzhang Zhao, Ruochong Fan \\
+        Student ID: hs3375, hz2832, rf2826 \\
+}
+\maketitle
+
+\subsection*{Defining stack function and simulation example}
+
+<<echo = TRUE, tidy=TRUE, cache=TRUE>>=
+## No longer assuming no ties
+survival_stack <- function(Dataset, Observed_time, Status, Truncation = TRUE, 
+                           L) { #Status must be a binary vector
+  ##
+  #Dataset must be sorted before provided as argument
+  ## 
+  New_dataset <- NULL
+  at_risk_index <- 0
+  if (Truncation == FALSE) {
+    L = rep(0, dim(Dataset)[1])
+  }
+  
+  # Binary outcome, indicating which individual expereienced event in a given at risk set
+  y_R <- NULL
+  
+  # Unique event times
+  unique_event_time <- unique(Observed_time[Status == 1])
+  
+  for (i in 1:dim(Dataset)[1]) {
+    if (Status[i] == 1 & Observed_time[i] %in% unique_event_time) { # if we have a event time ...
+      at_risk_index <- at_risk_index + 1 # we define a at risk set with this index
+      for (j in 1:dim(Dataset)[1]) { # then go through entire dataset again
+        if (Observed_time[i] > L[j] & Observed_time[j] >= Observed_time[i]) { 
+          # geting at risk set at 
+          # the given event time
+          if (Observed_time[j] == Observed_time[i] & Status[j] == 1) {
+            New_dataset <- rbind(New_dataset, c(c(t(Dataset[j,])), 
+                                                at_risk_index))
+            y_R<- c(y_R, 1)
+          } else{
+             New_dataset <- rbind(New_dataset, c(c(t(Dataset[j,])),
+                                                 at_risk_index))
+            y_R <- c(y_R, 0)
+          }
+        }
+      }
+      unique_event_time <- unique_event_time[ !unique_event_time == Observed_time[i]]
+      #print(unique_event_time)
+    }
+  }
+  return(cbind(New_dataset, y_R))
+}  
+
+## Example in paper
+X <- data.frame("Observed_time" = c(5, 1, 1, 2, 3, 3, 5),
+                "Status" = c(0, 1, 1,  0, 1, 0, 1),
+                "C1" = c(123, 7, 100,  8, 9, 10, 111),
+                "C2" = c(456, 9, 0.5, 10, 5, 3, 222))
+
+X <- X[order(X$Observed_time),]
+
+X_star <- survival_stack(Dataset=X, Observed_time = X$Observed_time,
+              Status = X$Status, 
+               Truncation =FALSE)
+
+X_star <- data.frame(X_star)
+
+names(X_star) <- c('Observed_time','Status','C1','C2','At_risk_set', 'Event_indicator')
+
+# Wroks correctly # Ties handled as well
+X_star
+
+
+## Heart data https://www.ncbi.nlm.nih.gov/pmc/articles/PMC5519051/
+Heart <- read.csv("Heart.csv")
+
+
+Heart <- Heart[order(Heart$TIME),]
+
+## Divide Ejection Fraction and platelets into levels log transform
+Heart$EF30to50 <- rep(0, dim(Heart)[1])
+Heart$EFgeq50 <- rep(0, dim(Heart)[1])
+Heart$log_CPK<- rep(0, dim(Heart)[1])
+Heart$PleteletsleqQ1<- rep(0, dim(Heart)[1])
+Heart$PleteletsgeqQ3<- rep(0, dim(Heart)[1])
+
+
+for (i in 1:dim(Heart)[1]){
+  if (30 < Heart$Ejection.Fraction[i] & Heart$Ejection.Fraction[i] <= 45) {
+    Heart$EF30to50[i] = 1
+  } else if (Heart$Ejection.Fraction[i] > 45) {
+    Heart$EFgeq50[i] = 1
+  }
+  
+  Heart$log_CPK[i] <- log(Heart$CPK[i])
+
+  if (Heart$Pletelets[i] <= quantile(Heart$Pletelets)[2]){
+    Heart$PleteletsleqQ1[i] = 1
+  } else if (Heart$Pletelets[i] >= quantile(Heart$Pletelets)[4])
+    Heart$PleteletsgeqQ3[i] = 1
+}
+
+# Remove original Ejection.Fraction and pletelets and CPK
+Heart <- Heart[,-c(9, 12, 13)]
+
+#write.csv(Heart, "Heart_cox.csv")
+
+Heart1 <- survival_stack(Dataset=Heart, Status =Heart$Event,
+                              Observed_time =Heart$TIME,
+               Truncation =FALSE)
+
+
+Heart2 <- data.frame(Heart1)
+
+names(Heart2) <- c("TIME", "Event", "Gender", "Smoking", "Diabetes", "BP", 
+                   "Anaemia", "Age", "Sodium", "Creatinine", "EF30to50", 
+                   "EFgeq50", "log_CPK", "PleteletsleqQ1", "PleteletsgeqQ3",
+                   "At_risk_set", "Event_indicator")
+
+Heart3 <- Heart2[,-c(1, 2)]
+#write.csv(Heart3, "Heart_atrisk.csv")
+
+
+matrix <- model.matrix(~ factor(At_risk_set) + Gender + Smoking + Diabetes + BP + 
+                   Anaemia + Age + Sodium + Creatinine + EF30to50 + 
+                   EFgeq50 + log_CPK + PleteletsleqQ1 + PleteletsgeqQ3 - 1
+                  , Heart3 )
+
+
+Heart4 <- data.frame(matrix)
+Heart4$Event_indicator <- Heart3$Event_indicator
+#write.csv(Heart4, "Heart_at_risk_dummy.csv")
+@
+\subsection*{Preparing Training set and Test set for calculating Harrell's C}
+\textbf{Note}: We variable importance/significance and survival curve plotting portion of the project, we use entire Heart data.
+In addition, we use a validation set to select neural network structure but eventually we train neural net with the entire dataset. \\
+\textbf{Note}: For calculating Harrel's C, every ML methods get trained on the test set and perform Harrell's C calculation with the test set.
+<<echo = TRUE, tidy=TRUE, cache=TRUE>>=
+## Randomly select 80% of subjects from Heart as Training set
+# Attaching the index column
+Heart$index <- as.numeric(row.names(Heart))
+
+set.seed(3375)
+test_indices <- sample(c(1:dim(Heart)[1]), floor(dim(Heart)[1]*0.2))
+Train_set <- Heart[-test_indices, ]
+Test_set <- Heart[test_indices, ]
+
+#write.csv(Train_set, "Train_set_cox.csv")
+#write.csv(Test_set, "Test_set.csv") # we only need this so call it THE test set
+
+# Storing training and testing set index
+Train_set_index <- Train_set$index
+Test_set_index <- Test_set$index
+
+# Stacking indexed Heart data
+Heart_ind1 <- survival_stack(Dataset=Heart, Status =Heart$Event,
+                              Observed_time =Heart$TIME,
+               Truncation =FALSE)
+
+Heart_ind2 <- data.frame(Heart_ind1)
+
+names(Heart_ind2) <- c("TIME", "Event", "Gender", "Smoking", "Diabetes", "BP", 
+                   "Anaemia", "Age", "Sodium", "Creatinine", "EF30to50", 
+                   "EFgeq50", "log_CPK", "PleteletsleqQ1", "PleteletsgeqQ3",
+                   "index", "At_risk_set", "Event_indicator")
+
+
+Heart_ind3 <-Heart_ind2[,-2]
+
+Train_set3 <- Heart_ind3[Heart_ind3$index %in% Train_set_index,]
+#Test_set3 <- Heart_ind3[Heart_ind3$index %in% Test_set_index,]
+
+#write.csv(Train_set3, "Train_set_atrisk.csv")
+#write.csv(Test_set3, "Test_set_atrisk.csv") # we do not need this !!
+
+matrix <- model.matrix(~ TIME + factor(At_risk_set) + Gender + Smoking + Diabetes + BP + 
+                   Anaemia + Age + Sodium + Creatinine + EF30to50 + 
+                   EFgeq50 + log_CPK + PleteletsleqQ1 + PleteletsgeqQ3 +
+                   index - 1
+                  , Heart_ind3)
+
+Heart_ind4 <- data.frame(matrix)
+Heart_ind4$Event_indicator <- Heart_ind3$Event_indicator
+
+Train_set4 <- Heart_ind4[Heart_ind4$index %in% Train_set_index,]
+#Test_set4 <- Heart_ind4[Heart_ind4$index %in% Test_set_index,]
+
+#write.csv(Train_set4, "Train_set_atrisk_dummy.csv")
+#write.csv(Test_set4, "Test_set_atrisk_dummy.csv") # we do not need this !!
+@
+\subsection*{Cox fit}
+<<echo = TRUE, tidy=TRUE, cache=TRUE>>=
+Heart_cox <- read.csv("Heart_cox.csv")
+library(survival)
+cox_fit <- coxph(Surv(TIME, Event)~Gender + Smoking + Diabetes + BP + Anaemia + 
+                   Age + EF30to50 +  EFgeq50 + Sodium + Creatinine + log_CPK +
+                   PleteletsleqQ1 + PleteletsgeqQ3, data=Heart_cox)
+
+summary(cox_fit)
+
+# Gender = 1 Age = 40
+new_data_base <- data.frame("Gender" = 0,  "Smoking" = 0,  "Diabetes" = 0,  "BP" = 0,
+                       "Anaemia" = 0, "Age" = 0, "EF30to50" = 0,
+                     "EFgeq50" = 0, "Sodium" = 0,  "Creatinine" = 0, 
+                     "log_CPK" = 0 , "PleteletsleqQ1" = 0 , "PleteletsgeqQ3" = 0)
+
+#mod.3 <- coxph(Surv(time, status) ~ (age + wt.loss)*sex, data=cancer)
+surv_fit_base <- survfit(cox_fit, newdata = new_data_base)
+plot(surv_fit_base)
+@
+\subsection*{Cox Regression Harrell's C calculation}
+<<echo = TRUE, tidy=TRUE, cache=TRUE>>=
+library(survival)
+library(pec)
+Test_set_cox <- read.csv("Test_Set.csv")[-c(1, 17)]
+Train_set_cox <- read.csv("Train_set_cox.csv")[-c(1, 17)]
+Train_set_cox$TIME <- as.numeric(Train_set_cox$TIME)
+cox_fit_train <- coxph(Surv(TIME, Event) ~ ., data = Train_set_cox, x = TRUE)
+median <- quantile(Train_set_cox$TIME[Train_set_cox$Event==1])[3]
+upper_quartile <- quantile(Train_set_cox$TIME[Train_set_cox$Event==1])[4]
+cox_surv_pred <- predictSurvProb(cox_fit_train,newdata=Test_set_cox, 
+                            times=c(median, upper_quartile))
+
+
+
+
+## ETAS in the Harrell's c formula calculate
+ETA_median <- cox_surv_pred[,1]
+
+# Prepare a data frame for calculating Harrell's c (Median)
+Harrell_c_median <- data.frame(cbind(ETA_median, ETA_median, Test_set_cox$TIME, 
+                                     Test_set_cox$TIME, Test_set_cox$Event))
+
+ETA_upper_quartile <- cox_surv_pred[,2]
+
+# Prepare a data frame for calculating Harrell's c (Upper Quartile)
+Harrell_c_up_qautile <- data.frame(cbind(ETA_upper_quartile, ETA_upper_quartile,
+                                            Test_set_cox$TIME, Test_set_cox$TIME, 
+                                            Test_set_cox$Event))
+
+numerator_med <- 0
+denominator_med <- 0
+for (i in 1:59) {
+  for (j in 1:59) {
+    if (i != j) {
+      numerator_med = numerator_med + 
+        (Harrell_c_median[i,3] > Harrell_c_median[j,4]) * 
+        (Harrell_c_median[j,1] < Harrell_c_median[i,2]) * 
+        (Harrell_c_median[j,5] == 1)
+      
+      denominator_med = denominator_med +
+        (Harrell_c_median[i,3] > Harrell_c_median[j,4])*
+        (Harrell_c_median[j,5] == 1)
+    }
+  }
+}
+
+numerator_med / denominator_med
+
+numerator_upquar <- 0
+denominator_upquar <- 0
+for (i in 1:59) {
+  for (j in 1:59) {
+    if (i != j) {
+      numerator_upquar = numerator_upquar + 
+        (Harrell_c_up_qautile[i,3] > Harrell_c_up_qautile[j,4]) * 
+        (Harrell_c_up_qautile[j,1] < Harrell_c_up_qautile[i,2]) * 
+        (Harrell_c_up_qautile[j,5] == 1)
+      
+      denominator_upquar = denominator_upquar +
+        (Harrell_c_up_qautile[i,3] > Harrell_c_up_qautile[j,4])*
+        (Harrell_c_up_qautile[j,5] == 1)
+    }
+  }
+}
+
+numerator_upquar / denominator_upquar
+@
+
+\subsection*{Logistic fit}
+<<echo = TRUE, tidy=TRUE, cache=TRUE>>=
+Heart_atrisk <- read.csv("Heart_atrisk.csv")
+model = glm(Event_indicator ~ factor(At_risk_set) +  Gender + Smoking +
+              Diabetes + BP + Anaemia + Age + EF30to50 +  EFgeq50  + 
+              Sodium + Creatinine + log_CPK + PleteletsleqQ1 + PleteletsgeqQ3
+             - 1, family = 'binomial', data = Heart_atrisk)
+
+#summary(model)
+summary(model)$coefficients[c(70:82),]
+
+alpha <- as.numeric(summary(model)$coefficients[c(1:69),][,1])
+
+hazard <- exp(alpha)
+
+hazard[hazard > 1] <- 1
+
+hazard_logi <- c(0, c(hazard))
+
+
+### Baseline survival curve
+Event_times <- c(0, c(Heart$TIME[Heart$Event == 1]))
+
+# cox baseline survival curve
+plot(surv_fit_base)
+
+# logistic baseline survival curve
+lines(unique(Event_times), cumprod(1 - hazard_logi), lwd=2, col="red")
+@
+
+\subsection*{Logistic Regression Harrell's C calculation}
+<<echo = TRUE, tidy=TRUE, cache=TRUE>>=
+Test_set_logi <- read.csv("Test_set.csv")[,-1]
+Train_set_logi <- read.csv("Train_set_atrisk_dummy.csv")[,-c(1,2, 85)]
+NEW_DATA <- NULL
+
+for (i in 1:dim(Test_set_logi)[1]) {
+  new_data <- data.frame(cbind(diag(rep(1, 69)), 
+                             matrix(rep(as.numeric(Test_set_logi[i,]), 69), 
+                                    69, 16, byrow=TRUE)))
+  NEW_DATA <- rbind(NEW_DATA, new_data)
+}
+
+colnames(NEW_DATA) <- c(colnames(Train_set_logi)[1:69], 
+                        colnames(Test_set_logi))
+
+
+logi_trained <- glm(Event_indicator ~ . - 1, 
+                    family = 'binomial', data = Train_set_logi)
+
+prediction_logi <- predict(logi_trained, newdata = data.frame(NEW_DATA) , 
+                         type = "response")
+
+Event_times <- unique(c(Heart$TIME[Heart$Event == 1]))
+library(stats)
+Survival_curve <- list()
+for (i in 0:(dim(Test_set_logi)[1] - 1)){
+  j = i * 69
+  hazard_logi_i <- c(0, c(prediction_logi[(j+1):(j+69)]))
+  Survival_curve <- append(Survival_curve, 
+                         stepfun(Event_times, cumprod(1 - hazard_logi_i)))
+}
+
+Survival_curve_testsub1 <- list()
+# Plotting the first survival curve (sanity check)
+plot(Survival_curve[[1]], do.points=FALSE)
+Survival_curve_testsub1 <- append(Survival_curve_testsub1, Survival_curve[[1]])
+
+# Calculating the quantiles of observed event times in the train set
+Train_set_cox <- read.csv("Train_set_cox.csv")
+quantiles <- quantile(Train_set_cox$TIME[Train_set_cox$Event == 1])
+
+median <- quantiles[3]
+upper_quartile <- quantiles[4]
+
+## ETAS in the Harrell's c formula calculate
+ETA_median <- NULL
+# Evaluate survival curve at median event time in train set 
+for (i in 1:59) {
+  Surv_curve <- Survival_curve[[i]]
+  ETA_median <- c(ETA_median, Surv_curve(median))
+}
+# Prepare a data frame for calculating Harrell's c (Median)
+Harrell_c_median <- data.frame(cbind(ETA_median, ETA_median, Test_set_logi$TIME, 
+                                     Test_set_logi$TIME, Test_set_logi$Event))
+
+ETA_upper_quartile <- NULL
+# Evaluate survival curve at upper quartile event time in train set 
+for (i in 1:59) {
+  Surv_curve <- Survival_curve[[i]]
+  ETA_upper_quartile  <- c(ETA_upper_quartile , Surv_curve(upper_quartile))
+}
+# Prepare a data frame for calculating Harrell's c (Upper Quartile)
+Harrell_c_up_qautile <- data.frame(cbind(ETA_upper_quartile, ETA_upper_quartile,
+                                            Test_set_logi$TIME, Test_set_logi$TIME, 
+                                            Test_set_logi$Event))
+
+numerator_med <- 0
+denominator_med <- 0
+for (i in 1:59) {
+  for (j in 1:59) {
+    if (i != j) {
+      numerator_med = numerator_med + 
+        (Harrell_c_median[i,3] > Harrell_c_median[j,4]) * 
+        (Harrell_c_median[j,1] < Harrell_c_median[i,2]) * 
+        (Harrell_c_median[j,5] == 1)
+      
+      denominator_med = denominator_med +
+        (Harrell_c_median[i,3] > Harrell_c_median[j,4])*
+        (Harrell_c_median[j,5] == 1)
+    }
+  }
+}
+
+numerator_med / denominator_med
+
+numerator_upquar <- 0
+denominator_upquar <- 0
+for (i in 1:59) {
+  for (j in 1:59) {
+    if (i != j) {
+      numerator_upquar = numerator_upquar + 
+        (Harrell_c_up_qautile[i,3] > Harrell_c_up_qautile[j,4]) * 
+        (Harrell_c_up_qautile[j,1] < Harrell_c_up_qautile[i,2]) * 
+        (Harrell_c_up_qautile[j,5] == 1)
+      
+      denominator_upquar = denominator_upquar +
+        (Harrell_c_up_qautile[i,3] > Harrell_c_up_qautile[j,4])*
+        (Harrell_c_up_qautile[j,5] == 1)
+    }
+  }
+}
+
+numerator_upquar / denominator_upquar
+@
+
+\subsection*{Random Forest fit}
+<<echo = TRUE, tidy=TRUE, cache=TRUE>>=
+Heart_at_risk_dummy <- read.csv("Heart_at_risk_dummy.csv")[,-1]
+library(randomForest)
+
+# Each split randomly select 1/3 of predictors
+#rf_fit1 <- randomForest(factor(Event_indicator) ~., data = Heart_at_risk_dummy, 
+#                       mtry=28)
+
+# Each split randomly select 2/3 of predictors
+rf_fit2 <- randomForest(factor(Event_indicator) ~., data = Heart_at_risk_dummy, 
+                       mtry=56)
+
+
+
+new_data <- data.frame(cbind(diag(rep(1, 69)), 
+                             matrix(rep(0, 13 * 69), 69, 13)))
+colnames(new_data) <- colnames(Heart_at_risk_dummy)[1:82]
+
+pred_fit2 <- predict(rf_fit2, newdata = new_data , type = "prob")
+
+hazard_rf <- c(0, c(pred_fit2[,2]))
+
+Event_times <- c(0, c(Heart$TIME[Heart$Event == 1]))
+
+# cox baseline survival curve
+plot(surv_fit_base)
+
+# logistic baseline survival curve
+lines(unique(Event_times), cumprod(1 - hazard_logi), lwd=2, col="red")
+
+# Random Forest baseline survival curve
+lines(unique(Event_times), cumprod(1- hazard_rf), lwd=2, col="blue")
+@
+
+\subsection*{Random Forest Variable Importance}
+<<echo = TRUE, tidy=TRUE, cache=TRUE>>=
+#importance(rf_fit2, type = "2")  # Gini importance value
+varImpPlot(rf_fit2, type = "2") # Gini importance plot
+@
+\textbf{Mean Decrease Gini} - Measure of variable importance based on the Gini impurity index used for the calculation of splits in trees.
+
+\subsection*{Random Forest Harrell's C calculation}
+<<echo = TRUE, tidy=TRUE, cache=TRUE>>=
+Test_set_rf <- read.csv("Test_set.csv")[,-1]
+Train_set_rf <- read.csv("Train_set_atrisk_dummy.csv")[,-c(1,2, 85)]
+NEW_DATA <- NULL
+
+for (i in 1:dim(Test_set_rf)[1]) {
+  new_data <- data.frame(cbind(diag(rep(1, 69)), 
+                             matrix(rep(as.numeric(Test_set_rf[i,]), 69), 
+                                    69, 16, byrow=TRUE)))
+  NEW_DATA <- rbind(NEW_DATA, new_data)
+}
+
+colnames(NEW_DATA) <- c(colnames(Train_set_rf)[1:69], colnames(Test_set_rf))
+
+library(randomForest)
+rf_trained <- randomForest(factor(Event_indicator) ~., data = Train_set_rf, 
+                       mtry=56)
+
+prediction_rf <- predict(rf_trained, newdata = data.frame(NEW_DATA) , 
+                         type = "prob")
+
+Event_times <- unique(c(Heart$TIME[Heart$Event == 1]))
+library(stats)
+Survival_curve <- list()
+for (i in 0:(dim(Test_set_rf)[1] - 1)){
+  j = i * 69
+  hazard_rf_i <- c(0, c(prediction_rf[(j+1):(j+69),2]))
+  Survival_curve <- append(Survival_curve, 
+                         stepfun(Event_times, cumprod(1 - hazard_rf_i)))
+}
+
+# Plotting the first survival curve (sanity check)
+plot(Survival_curve[[1]], do.points=FALSE)
+
+# Calculating the quantiles of observed event times in the train set
+Train_set_cox <- read.csv("Train_set_cox.csv")
+quantiles <- quantile(Train_set_cox$TIME[Train_set_cox$Event == 1])
+
+median <- quantiles[3]
+upper_quartile <- quantiles[4]
+
+## ETAS in the Harrell's c formula calculate
+ETA_median <- NULL
+# Evaluate survival curve at median event time in train set 
+for (i in 1:59) {
+  Surv_curve <- Survival_curve[[i]]
+  ETA_median <- c(ETA_median, Surv_curve(median))
+}
+# Prepare a data frame for calculating Harrell's c (Median)
+Harrell_c_median <- data.frame(cbind(ETA_median, ETA_median, Test_set_rf$TIME, 
+                                     Test_set_rf$TIME, Test_set_rf$Event))
+
+ETA_upper_quartile <- NULL
+# Evaluate survival curve at upper quartile event time in train set 
+for (i in 1:59) {
+  Surv_curve <- Survival_curve[[i]]
+  ETA_upper_quartile  <- c(ETA_upper_quartile , Surv_curve(upper_quartile))
+}
+# Prepare a data frame for calculating Harrell's c (Upper Quartile)
+Harrell_c_up_qautile <- data.frame(cbind(ETA_upper_quartile, ETA_upper_quartile,
+                                            Test_set_rf$TIME, Test_set_rf$TIME, 
+                                            Test_set_rf$Event))
+
+numerator_med <- 0
+denominator_med <- 0
+for (i in 1:59) {
+  for (j in 1:59) {
+    if (i != j) {
+      numerator_med = numerator_med + 
+        (Harrell_c_median[i,3] > Harrell_c_median[j,4]) * 
+        (Harrell_c_median[j,1] < Harrell_c_median[i,2]) * 
+        (Harrell_c_median[j,5] == 1)
+      
+      denominator_med = denominator_med +
+        (Harrell_c_median[i,3] > Harrell_c_median[j,4])*
+        (Harrell_c_median[j,5] == 1)
+    }
+  }
+}
+
+numerator_med / denominator_med
+
+numerator_upquar <- 0
+denominator_upquar <- 0
+for (i in 1:59) {
+  for (j in 1:59) {
+    if (i != j) {
+      numerator_upquar = numerator_upquar + 
+        (Harrell_c_up_qautile[i,3] > Harrell_c_up_qautile[j,4]) * 
+        (Harrell_c_up_qautile[j,1] < Harrell_c_up_qautile[i,2]) * 
+        (Harrell_c_up_qautile[j,5] == 1)
+      
+      denominator_upquar = denominator_upquar +
+        (Harrell_c_up_qautile[i,3] > Harrell_c_up_qautile[j,4])*
+        (Harrell_c_up_qautile[j,5] == 1)
+    }
+  }
+}
+
+numerator_upquar / denominator_upquar
+@
+
+\subsection*{Boosting fit}
+<<echo = TRUE, tidy=TRUE, cache=TRUE>>=
+Heart_at_risk_dummy <- read.csv("Heart_at_risk_dummy.csv")[,-1]
+Heart_at_risk_dummy$Event_indicator <- as.factor(Heart_at_risk_dummy$Event_indicator)
+
+library(adabag)
+Boosting_fit1 <- boosting(Event_indicator~., data = Heart_at_risk_dummy, 
+                          boos=TRUE, mfinal=50)
+
+new_data <- data.frame(cbind(diag(rep(1, 69)), 
+                             matrix(rep(0, 13 * 69), 69, 13)))
+colnames(new_data) <- colnames(Heart_at_risk_dummy)[1:82]
+
+pred_fit_boost <- predict(Boosting_fit1, newdata = new_data , type = "prob")
+
+hazard_boost <- c(0, c(pred_fit_boost$prob[,2]))
+
+Event_times <- c(0, c(Heart$TIME[Heart$Event == 1]))
+
+# cox baseline survival curve
+plot(surv_fit_base)
+
+# logistic baseline survival curve
+lines(unique(Event_times), cumprod(1 - hazard_logi), lwd=2, col="red")
+
+# Random Forest baseline survival curve
+lines(unique(Event_times), cumprod(1- hazard_rf), lwd=2, col="blue")
+
+# Boosting baseline survival curve
+lines(unique(Event_times), cumprod(1- hazard_boost), lwd=2, col="green")
+@
+
+\subsection*{Boosting varaible importance}
+<<echo = TRUE, tidy=TRUE, cache=TRUE>>=
+object <- Boosting_fit1
+barplot(sort(object$imp, decreasing=TRUE)[9:1], horiz=TRUE,
+        main = "Variable relative importance", col = "lightgreen", 
+        las = 2, xaxs = "r", cex.names=0.8)
+@
+
+\subsection*{Boosting C calculation}
+<<echo = TRUE, tidy=TRUE, cache=TRUE>>=
+Test_set_boost <- read.csv("Test_set.csv")[,-1]
+Train_set_boost <- read.csv("Train_set_atrisk_dummy.csv")[,-c(1,2, 85)]
+Train_set_boost$Event_indicator <- as.factor(Train_set_boost$Event_indicator)
+NEW_DATA <- NULL
+
+#for (i in 1:dim(Test_set_boost)[1]) {
+#  new_data <- data.frame(cbind(diag(rep(1, 69)), 
+#                             matrix(rep(as.numeric(Test_set_boost[i,]), 69), 
+#                                    69, 16, byrow=TRUE)))
+#  NEW_DATA <- rbind(NEW_DATA, new_data)
+#}
+
+#colnames(NEW_DATA) <- c(colnames(Train_set_boost)[1:69], 
+#                        colnames(Test_set_boost))
+
+
+#Boosting_trained <- boosting(Event_indicator~., data = Train_set_boost, 
+#                          boos=TRUE, mfinal=50)
+
+#prediction_boost <- predict(Boosting_trained, newdata = data.frame(NEW_DATA) , 
+#                         type = "prob")$prob
+
+# Reading stored prediction
+prediction_boost <- read.csv("prediction_boost.csv")[,-1]
+
+prediction_boost[1:5,]
+Event_times <- unique(c(Heart$TIME[Heart$Event == 1]))
+library(stats)
+Survival_curve <- list()
+for (i in 0:(dim(Test_set_boost)[1] - 1)){
+  j = i * 69
+  hazard_boost_i <- c(0, c(prediction_boost[(j+1):(j+69),2]))
+  Survival_curve <- append(Survival_curve, 
+                         stepfun(Event_times, cumprod(1 - hazard_boost_i)))
+}
+
+# Plotting the first survival curve (sanity check)
+plot(Survival_curve[[1]], do.points=FALSE)
+
+# Calculating the quantiles of observed event times in the train set
+Train_set_cox <- read.csv("Train_set_cox.csv")
+quantiles <- quantile(Train_set_cox$TIME[Train_set_cox$Event == 1])
+
+median <- quantiles[3]
+upper_quartile <- quantiles[4]
+
+## ETAS in the Harrell's c formula calculate
+ETA_median <- NULL
+# Evaluate survival curve at median event time in train set 
+for (i in 1:59) {
+  Surv_curve <- Survival_curve[[i]]
+  ETA_median <- c(ETA_median, Surv_curve(median))
+}
+# Prepare a data frame for calculating Harrell's c (Median)
+Harrell_c_median <- data.frame(cbind(ETA_median, ETA_median, Test_set_boost$TIME, 
+                                     Test_set_boost$TIME, Test_set_boost$Event))
+
+ETA_upper_quartile <- NULL
+# Evaluate survival curve at upper quartile event time in train set 
+for (i in 1:59) {
+  Surv_curve <- Survival_curve[[i]]
+  ETA_upper_quartile  <- c(ETA_upper_quartile , Surv_curve(upper_quartile))
+}
+# Prepare a data frame for calculating Harrell's c (Upper Quartile)
+Harrell_c_up_qautile <- data.frame(cbind(ETA_upper_quartile, ETA_upper_quartile,
+                                            Test_set_boost$TIME, Test_set_boost$TIME, 
+                                            Test_set_boost$Event))
+
+numerator_med <- 0
+denominator_med <- 0
+for (i in 1:59) {
+  for (j in 1:59) {
+    if (i != j) {
+      numerator_med = numerator_med + 
+        (Harrell_c_median[i,3] > Harrell_c_median[j,4]) * 
+        (Harrell_c_median[j,1] < Harrell_c_median[i,2]) * 
+        (Harrell_c_median[j,5] == 1)
+      
+      denominator_med = denominator_med +
+        (Harrell_c_median[i,3] > Harrell_c_median[j,4])*
+        (Harrell_c_median[j,5] == 1)
+    }
+  }
+}
+
+numerator_med / denominator_med
+
+numerator_upquar <- 0
+denominator_upquar <- 0
+for (i in 1:59) {
+  for (j in 1:59) {
+    if (i != j) {
+      numerator_upquar = numerator_upquar + 
+        (Harrell_c_up_qautile[i,3] > Harrell_c_up_qautile[j,4]) * 
+        (Harrell_c_up_qautile[j,1] < Harrell_c_up_qautile[i,2]) * 
+        (Harrell_c_up_qautile[j,5] == 1)
+      
+      denominator_upquar = denominator_upquar +
+        (Harrell_c_up_qautile[i,3] > Harrell_c_up_qautile[j,4])*
+        (Harrell_c_up_qautile[j,5] == 1)
+    }
+  }
+}
+
+numerator_upquar / denominator_upquar
+@
+
+\subsection*{Neural Network (ANN) Model fit}
+<<echo = TRUE, tidy=TRUE, cache=TRUE>>=
+Heart_at_risk_dummy <- read.csv("Heart_at_risk_dummy.csv")[,-1]
+library("keras")
+library("tensorflow")
+#batch normalization parameters
+alpha = .1  
+epsilon = 1e-4 
+@
+
+<<echo = TRUE, tidy=TRUE, cache=TRUE>>=
+## Ignore validation set
+train_data <- Heart_at_risk_dummy
+x_train <- as.matrix(train_data[,-83])
+y_train <- train_data[,83]
+
+NN_model2 <- keras_model_sequential() 
+NN_model2 %>% 
+  layer_dense(units = 128, activation = 'relu', input_shape = c(82)) %>% 
+  layer_dropout(rate = 0.3) %>%
+  layer_dense(units = 32, activation = 'relu') %>%
+  layer_dropout(rate = 0.3) %>%
+  layer_dense(units = 8, activation = 'relu') %>%
+  layer_dropout(rate = 0.3) %>%
+  layer_dense(units = 1, activation = 'sigmoid')
+
+summary(NN_model2)
+
+NN_model2 %>% compile(
+  loss = "binary_crossentropy",
+  optimizer = 'adam',
+  metrics = c('accuracy')
+)
+
+history <- NN_model2 %>% fit(
+  x_train, y_train,
+  epochs= 30, batch_size = 100, verbose=1
+)
+
+@
+
+<<echo = TRUE, tidy=TRUE, cache=TRUE>>=
+NN_fit <- NN_model2
+new_data <- data.frame(cbind(diag(rep(1, 69)), 
+                             matrix(rep(0, 13 * 69), 69, 13)))
+colnames(new_data) <- colnames(Heart_at_risk_dummy)[1:82]
+
+hazard <- predict(NN_fit, x = as.matrix(new_data))
+
+hazard_NN <- c(0, c(hazard))
+
+Event_times <- c(0, c(Heart$TIME[Heart$Event == 1]))
+
+# cox baseline survival curve
+plot(surv_fit_base)
+
+# logistic baseline survival curve
+lines(unique(Event_times), cumprod(1 - hazard_logi), lwd=2, col="red")
+
+# Random Forest baseline survival curve
+lines(unique(Event_times), cumprod(1- hazard_rf), lwd=2, col="blue")
+
+# Boosting baseline survival curve
+lines(unique(Event_times), cumprod(1- hazard_boost), lwd=2, col="green")
+
+# Neural Network baseline survival curve
+lines(unique(Event_times), cumprod(1- hazard_NN), lwd=2, col="orange")
+@
+
+\subsection*{ANN Harrell's C calculation}
+<<echo = TRUE, tidy=TRUE, cache=TRUE>>=
+Test_set_NN <- read.csv("Test_set.csv")[,-c(1,17)]
+Test_set_NN2 <- read.csv("Test_set.csv")[,-c(1, 2, 3, 17)]
+Train_set_NN <- read.csv("Train_set_atrisk_dummy.csv")[,-c(1,2, 85)]
+NEW_DATA <- NULL
+
+for (i in 1:dim(Test_set_NN2)[1]) {
+  new_data <- data.frame(cbind(diag(rep(1, 69)), 
+                             matrix(rep(as.numeric(Test_set_NN2[i,]), 69), 
+                                    69, 13, byrow=TRUE)))
+  NEW_DATA <- rbind(NEW_DATA, new_data)
+}
+
+colnames(NEW_DATA) <- c(colnames(Train_set_NN)[1:69], colnames(Test_set_NN2))
+@
+
+<<echo = TRUE, tidy=TRUE, cache=TRUE>>=
+x_train <- as.matrix(Train_set_NN[,-83])
+y_train <- Train_set_NN[,83]
+
+NN_model_train <- keras_model_sequential() 
+NN_model_train %>% 
+  layer_dense(units = 128, activation = 'relu', input_shape = c(82)) %>% 
+  layer_dropout(rate = 0.3) %>%
+  layer_dense(units = 32, activation = 'relu') %>%
+  layer_dropout(rate = 0.3) %>%
+  layer_dense(units = 8, activation = 'relu') %>%
+  layer_dropout(rate = 0.3) %>%
+  layer_dense(units = 1, activation = 'sigmoid')
+
+NN_model_train %>% compile(
+  loss = "binary_crossentropy",
+  optimizer = 'adam',
+  metrics = c('accuracy')
+)
+
+history <- NN_model_train %>% fit(
+  x_train, y_train,
+  epochs= 30, batch_size = 100, verbose=1
+)
+@
+
+<<echo = TRUE, tidy=TRUE, cache=TRUE>>=
+NN_fit_train <- NN_model_train
+
+prediction_NN <- predict(NN_fit_train, x = as.matrix(NEW_DATA))
+
+Event_times <- unique(c(Heart$TIME[Heart$Event == 1]))
+
+library(stats)
+Survival_curve <- list()
+for (i in 0:(dim(Test_set_NN)[1] - 1)){
+  j = i * 69
+  hazard_NN_i <- c(0, c(prediction_NN[(j+1):(j+69)]))
+  Survival_curve <- append(Survival_curve, 
+                         stepfun(Event_times, cumprod(1 - hazard_NN_i)))
+}
+
+# Plotting the first survival curve (sanity check)
+plot(Survival_curve[[1]], do.points=FALSE)
+Survival_curve_testsub1 <- append(Survival_curve_testsub1, Survival_curve[[1]])
+
+# Calculating the quantiles of observed event times in the train set
+Train_set_cox <- read.csv("Train_set_cox.csv")
+quantiles <- quantile(Train_set_cox$TIME[Train_set_cox$Event == 1])
+
+median <- quantiles[3]
+upper_quartile <- quantiles[4]
+
+## ETAS in the Harrell's c formula calculate
+ETA_median <- NULL
+# Evaluate survival curve at median event time in train set 
+for (i in 1:59) {
+  Surv_curve <- Survival_curve[[i]]
+  ETA_median <- c(ETA_median, Surv_curve(median))
+}
+# Prepare a data frame for calculating Harrell's c (Median)
+Harrell_c_median <- data.frame(cbind(ETA_median, ETA_median, Test_set_NN$TIME, 
+                                     Test_set_NN$TIME, Test_set_NN$Event))
+
+ETA_upper_quartile <- NULL
+# Evaluate survival curve at upper quartile event time in train set 
+for (i in 1:59) {
+  Surv_curve <- Survival_curve[[i]]
+  ETA_upper_quartile  <- c(ETA_upper_quartile , Surv_curve(upper_quartile))
+}
+# Prepare a data frame for calculating Harrell's c (Upper Quartile)
+Harrell_c_up_qautile <- data.frame(cbind(ETA_upper_quartile, ETA_upper_quartile,
+                                            Test_set_NN$TIME, Test_set_NN$TIME, 
+                                            Test_set_NN$Event))
+
+numerator_med <- 0
+denominator_med <- 0
+for (i in 1:59) {
+  for (j in 1:59) {
+    if (i != j) {
+      numerator_med = numerator_med + 
+        (Harrell_c_median[i,3] > Harrell_c_median[j,4]) * 
+        (Harrell_c_median[j,1] < Harrell_c_median[i,2]) * 
+        (Harrell_c_median[j,5] == 1)
+      
+      denominator_med = denominator_med +
+        (Harrell_c_median[i,3] > Harrell_c_median[j,4])*
+        (Harrell_c_median[j,5] == 1)
+    }
+  }
+}
+
+numerator_med / denominator_med
+
+numerator_upquar <- 0
+denominator_upquar <- 0
+for (i in 1:59) {
+  for (j in 1:59) {
+    if (i != j) {
+      numerator_upquar = numerator_upquar + 
+        (Harrell_c_up_qautile[i,3] > Harrell_c_up_qautile[j,4]) * 
+        (Harrell_c_up_qautile[j,1] < Harrell_c_up_qautile[i,2]) * 
+        (Harrell_c_up_qautile[j,5] == 1)
+      
+      denominator_upquar = denominator_upquar +
+        (Harrell_c_up_qautile[i,3] > Harrell_c_up_qautile[j,4])*
+        (Harrell_c_up_qautile[j,5] == 1)
+    }
+  }
+}
+
+numerator_upquar / denominator_upquar
+
+@
+
+
+\end{document}
